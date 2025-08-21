@@ -1,11 +1,12 @@
 """
 Master server for distributed file system management.
-Tracking file locations, storage nodes, and handling client requests.
+Tracking file locations, storage nodes, handling client requests, and managing file locks.
 """
 
 from utils import send_message, start_server
 from typing import Dict, List, Set, Any
 import time
+import threading
 
 
 class MasterServer:
@@ -21,6 +22,8 @@ class MasterServer:
         self.port = port
         self.files: Dict[str, List[int]] = {}  # {filename: [node_port1, node_port2, ...]}
         self.nodes: Set[int] = set()           # {5001, 5002, ...} - set of active storage node ports
+        self.locks: Dict[str, str] = {}        # {filename: client_id} - file locking system
+        self.lock_timeouts: Dict[str, float] = {}  # {filename: timestamp} - lock expiration tracking
 
     def handle_message(self, message: Dict) -> Dict:
         """
@@ -59,12 +62,59 @@ class MasterServer:
             else:
                 return {"error": "FILE_NOT_FOUND"}
 
+        elif cmd == "LOCK":
+            # Client requesting exclusive lock on a file
+            filename = message["filename"]
+            client_id = message["client_id"]
+
+            # Checking if file is already locked by another client
+            if filename in self.locks and self.locks[filename] != client_id:
+                return {"status": "LOCK_DENIED"}
+
+            # Granting lock to client with 30-second timeout
+            self.locks[filename] = client_id
+            self.lock_timeouts[filename] = time.time() + 30
+            return {"status": "LOCK_ACQUIRED"}
+
+        elif cmd == "UNLOCK":
+            # Client releasing lock on a file
+            filename = message["filename"]
+            client_id = message["client_id"]
+
+            # Verifying client owns the lock before releasing
+            if filename in self.locks and self.locks[filename] == client_id:
+                del self.locks[filename]
+                del self.lock_timeouts[filename]
+                return {"status": "UNLOCKED"}
+            return {"status": "NOT_YOUR_LOCK"}
+
         return {"error": "Invalid command"}  # Default response for unknown commands
+
+    def check_lock_timeouts(self):
+        """Automatically cleaning up expired locks."""
+        current_time = time.time()
+        expired_locks = [
+            filename for filename, expiry in self.lock_timeouts.items()
+            if expiry < current_time
+        ]
+        for filename in expired_locks:
+            if filename in self.locks:
+                del self.locks[filename]
+            if filename in self.lock_timeouts:
+                del self.lock_timeouts[filename]
 
     def start(self):
         """Starting the master server and beginning listening for incoming connections."""
         start_server(self.port, self.handle_message)  # Starting TCP server with our message handler
         print(f"Master server running on port {self.port}")
+
+        # Starting background thread for lock cleanup
+        def lock_cleanup_loop():
+            while True:
+                time.sleep(5)  # Checking every 5 seconds
+                self.check_lock_timeouts()
+
+        threading.Thread(target=lock_cleanup_loop, daemon=True).start()
 
 
 if __name__ == "__main__":
