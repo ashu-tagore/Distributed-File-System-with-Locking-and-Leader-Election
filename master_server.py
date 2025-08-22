@@ -1,9 +1,10 @@
 """
 Master server for distributed file system management.
 Tracking file locations, storage nodes, handling client requests, and managing file locks.
+Supporting leader election using bully algorithm.
 """
 
-from utils import send_message, start_server
+from utils import send_message, start_server  # Importing our socket communication utilities
 from typing import Dict, List, Set, Any
 import time
 import threading
@@ -20,10 +21,13 @@ class MasterServer:
             port: The port number this master server will listen on
         """
         self.port = port
-        self.files: Dict[str, List[int]] = {}  # {filename: [node_port1, node_port2, ...]}
-        self.nodes: Set[int] = set()           # {5001, 5002, ...} - set of active storage node ports
+        self.files: Dict[str, List[int]] = {}  # {filename: [node_port1, node_port2, ...]} - tracks file locations
+        self.nodes: Set[int] = set()           # {5001, 5002,...} - set of active storage node ports
         self.locks: Dict[str, str] = {}        # {filename: client_id} - file locking system
-        self.lock_timeouts: Dict[str, float] = {}  # {filename: timestamp} - lock expiration tracking
+        self.lock_timeouts: Dict[str, float] = {} # {filename: timestamp} - lock expiration tracking
+        self.is_primary = True                 # This instance is the primary master
+        self.backup_ports = [5001, 5002]       # Ports that can become masters
+        self.heartbeat_interval = 3            # Seconds between heartbeat checks
 
     def handle_message(self, message: Dict) -> Dict:
         """
@@ -88,6 +92,26 @@ class MasterServer:
                 return {"status": "UNLOCKED"}
             return {"status": "NOT_YOUR_LOCK"}
 
+        elif cmd == "ELECTION":
+            # Another node is starting an election
+            if message["sender_port"] < self.port:
+                # I have higher priority, so I respond
+                return {"response": "OK", "port": self.port}
+            return {"response": "IGNORE"}
+
+        elif cmd == "COORDINATOR":
+            # A new master is announcing itself
+            new_master_port = message["new_master_port"]
+            if new_master_port > self.port:
+                # New master has higher priority, step down
+                self.is_primary = False
+                print(f"🔄 Stepping down, new master: {new_master_port}")
+            return {"status": "ACKNOWLEDGED"}
+
+        elif cmd == "HEARTBEAT_CHECK":
+            # Check if master is alive
+            return {"status": "ALIVE"}
+
         return {"error": "Invalid command"}  # Default response for unknown commands
 
     def check_lock_timeouts(self):
@@ -103,18 +127,39 @@ class MasterServer:
             if filename in self.lock_timeouts:
                 del self.lock_timeouts[filename]
 
+    def check_backup_nodes(self):
+        """Checking if backup nodes are alive."""
+        for port in self.backup_ports:
+            try:
+                response = send_message("localhost", port, {
+                    "cmd": "HEARTBEAT_CHECK"
+                }, timeout=1)
+                if response:
+                    print(f"✅ Backup node {port} is alive")
+            except:
+                print(f"❌ Backup node {port} is offline")
+
     def start(self):
         """Starting the master server and beginning listening for incoming connections."""
         start_server(self.port, self.handle_message)  # Starting TCP server with our message handler
-        print(f"Master server running on port {self.port}")
+        print(f"🎯 Primary master server running on port {self.port}")
 
         # Starting background thread for lock cleanup
         def lock_cleanup_loop():
             while True:
-                time.sleep(5)  # Checking every 5 seconds
+                time.sleep(5)
                 self.check_lock_timeouts()
 
         threading.Thread(target=lock_cleanup_loop, daemon=True).start()
+
+        # Starting background thread for node monitoring
+        def node_monitor_loop():
+            while True:
+                time.sleep(self.heartbeat_interval)
+                if self.is_primary:
+                    self.check_backup_nodes()
+
+        threading.Thread(target=node_monitor_loop, daemon=True).start()
 
 
 if __name__ == "__main__":
@@ -125,6 +170,6 @@ if __name__ == "__main__":
     # Keeping server running until interrupted
     try:
         while True:
-            time.sleep(1)  # Sleeping to reduce CPU usage
+            time.sleep(1)
     except KeyboardInterrupt:
-        print("\nShutting down master server")  # Cleaning exit on Ctrl+C
+        print("\nShutting down master server")

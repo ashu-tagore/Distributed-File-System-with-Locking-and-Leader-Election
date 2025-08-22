@@ -1,4 +1,4 @@
-from utils import send_message
+from utils import send_message  # Importing our socket communication utility
 
 def test_master():
     # Test 1: Register a node

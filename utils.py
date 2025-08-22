@@ -8,7 +8,7 @@ import threading
 from typing import Callable, Any
 
 
-def send_message(host: str, port: int, message: Any) -> Any:
+def send_message(host: str, port: int, message: Any, timeout:float = 2.0) -> Any:
     """
     Send a message to a server and return the response.
 
@@ -22,6 +22,7 @@ def send_message(host: str, port: int, message: Any) -> Any:
     """
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
             s.connect((host, port))
             s.sendall(pickle.dumps(message)) #Converting the message to bytes
             return pickle.loads(s.recv(4096)) # Receiving the response and converting it back to a python object
